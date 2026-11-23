@@ -87,13 +87,45 @@ export function validateBusinessEventRows(
 }
 
 /**
+ * Reset the business events gauge and apply normalised counts from the given rows.
+ * Accepts numeric strings and finite numbers; skips invalid counts and logs once.
+ */
+export function recordBusinessEventRows(
+  rows: ReadonlyArray<BusinessEventMetricRow>,
+): void {
+  // Reset to handle the failure state where a reorg drops all events of a type
+  businessEventsTotal.reset();
+
+  let loggedInvalidCount = false;
+  for (const row of rows) {
+    const count =
+      typeof row.count === 'string' && row.count.trim() === ''
+        ? Number.NaN
+        : Number(row.count);
+
+    if (!Number.isFinite(count)) {
+      if (!loggedInvalidCount) {
+        loggedInvalidCount = true;
+        logger.warn('Skipping business event metric row with invalid count', undefined, {
+          event_type: row.event_type,
+          count: row.count,
+        });
+      }
+      continue;
+    }
+
+    businessEventsTotal.set({ event_type: row.event_type }, count);
+  }
+}
+
+/**
  * Query the database to idempotently count business events.
  * Only known business events ('stream.created', 'withdrawal.made') are counted
  * to strictly bound label cardinality.
  */
 export async function collectBusinessEvents(pool: pg.Pool): Promise<void> {
   try {
-    const result = await pool.query<{ event_type: string, count: string }>(`
+    const result = await pool.query<{ event_type: string; count: string | number }>(`
       SELECT event_type, COUNT(*) as count
       FROM contract_events
       WHERE event_type IN ('stream.created', 'withdrawal.made')
@@ -102,12 +134,7 @@ export async function collectBusinessEvents(pool: pg.Pool): Promise<void> {
 
     const validatedRows = validateBusinessEventRows(result.rows);
 
-    // Reset to handle the failure state where a reorg drops all events of a type
-    businessEventsTotal.reset();
-
-    for (const row of validatedRows) {
-      businessEventsTotal.set({ event_type: row.event_type }, parseInt(row.count, 10));
-    }
+    recordBusinessEventRows(validatedRows);
   } catch (err) {
     if (err instanceof BusinessEventValidationError) {
       throw err;
